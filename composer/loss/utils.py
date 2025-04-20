@@ -10,7 +10,7 @@ from typing import Optional
 
 import torch
 
-__all__ = ['infer_target_type', 'ensure_targets_one_hot', 'check_for_index_targets']
+__all__ = ["infer_target_type", "ensure_targets_one_hot", "check_for_index_targets"]
 
 
 def infer_target_type(input: torch.Tensor, targets: torch.Tensor) -> str:
@@ -18,16 +18,19 @@ def infer_target_type(input: torch.Tensor, targets: torch.Tensor) -> str:
 
     Example indices format: [1, 4, 7] Example one_hot format [[0, 1, 0], [1, 0, 0], ...]
     """
-    if input.shape == targets.shape:
-        return 'one_hot'
-    elif input.ndim == targets.ndim + 1:
-        return 'indices'
+    input_shape = input.shape
+    target_shape = targets.shape
+
+    if input_shape == target_shape:
+        return "one_hot"
+    elif len(input_shape) == len(target_shape) + 1:
+        return "indices"
     else:
         raise RuntimeError(
-            f'Unable to infer indices or one_hot. Targets has shape {targets.shape}'
-            f' and the inputs to cross entropy has shape {input.shape}. For one_hot, '
-            'expect targets.shape == inputs.shape. For indices, expect '
-            'inputs.ndim == targets.ndim + 1',
+            f"Unable to infer indices or one_hot. Targets has shape {target_shape}"
+            f" and the inputs to cross entropy has shape {input_shape}. For one_hot, "
+            "expect targets.shape == inputs.shape. For indices, expect "
+            "inputs.ndim == targets.ndim + 1",
         )
 
 
@@ -50,7 +53,7 @@ def ensure_targets_one_hot(
         num_classes (int, optional): Number of classes. If not specified, this will be inferred
             from input. Default: ``None``
     """
-    if infer_target_type(input, targets) == 'indices':
+    if infer_target_type(input, targets) == "indices":
         # If the number of classes isn't specified, attempt to infer it from the input
         if num_classes is None:
             num_classes = input.shape[1]
@@ -66,7 +69,9 @@ def check_for_index_targets(targets: torch.Tensor) -> bool:
     return targets.dtype in index_dtypes
 
 
-def _one_hot(tensor: torch.Tensor, num_classes: int = -1, dim: int = -1) -> torch.Tensor:
+def _one_hot(
+    tensor: torch.Tensor, num_classes: int = -1, dim: int = -1
+) -> torch.Tensor:
     """Converts a tensor of index class labels to a tensor of one-hot class labels.
 
     Implementation is based on MONAI one-hot conversion function:
@@ -84,19 +89,23 @@ def _one_hot(tensor: torch.Tensor, num_classes: int = -1, dim: int = -1) -> torc
             extra dimension of size ``num_classes`` inserted after the first dimension
     """
     if not check_for_index_targets(tensor):
-        raise ValueError(f'tensor must be integer type, current type: {tensor.dtype}')
+        raise ValueError(f"tensor must be integer type, current type: {tensor.dtype}")
 
     max_index = tensor.max() + 1
     if num_classes == -1:
         num_classes = int(max_index)
 
     if num_classes < max_index:
-        raise ValueError(f'num_classes must be greater than or equal to tensor.max() + 1: {num_classes} < {max_index}')
+        raise ValueError(
+            f"num_classes must be greater than or equal to tensor.max() + 1: {num_classes} < {max_index}"
+        )
 
     # Remove negative indices
     neg_indices = tensor.min() < 0
     if neg_indices:
-        warnings.warn('Negative label indices are being ignored in conversion to one-hot labels')
+        warnings.warn(
+            "Negative label indices are being ignored in conversion to one-hot labels"
+        )
         tensor = tensor.clone().long()
         tensor[tensor < 0] = num_classes
         num_classes += 1  # Add extra class for negative indices
@@ -107,7 +116,9 @@ def _one_hot(tensor: torch.Tensor, num_classes: int = -1, dim: int = -1) -> torc
     tensor_shape[dim] = num_classes
 
     # Convert to one-hot
-    one_hot_tensor = torch.zeros(size=tensor_shape, dtype=tensor.dtype, device=tensor.device)
+    one_hot_tensor = torch.zeros(
+        size=tensor_shape, dtype=tensor.dtype, device=tensor.device
+    )
     one_hot_tensor.scatter_(dim=dim, index=tensor, value=1)
 
     # Remove negative indices
