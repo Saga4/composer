@@ -4,6 +4,7 @@
 import inspect
 import logging
 import math
+from functools import lru_cache
 from operator import attrgetter
 from typing import Callable, Optional
 
@@ -13,7 +14,9 @@ log = logging.getLogger(__name__)
 
 # Alibi applies module surgery to registered modules using their associated alibi replacement function.
 # Such functions must have the following signature:
-AlibiReplacementFunction = Callable[[torch.nn.Module, int, int], Optional[torch.nn.Module]]
+AlibiReplacementFunction = Callable[
+    [torch.nn.Module, int, int], Optional[torch.nn.Module]
+]
 
 
 class PolicyRegistry(dict[type[torch.nn.Module], AlibiReplacementFunction]):
@@ -70,7 +73,9 @@ class PolicyRegistry(dict[type[torch.nn.Module], AlibiReplacementFunction]):
         `policy_registry` in :func:`composer.algorithms.alibi.apply_alibi`.
         """
         if len(modules) == 0:
-            raise ValueError('Registry decoration without any module class inputs has no effect.')
+            raise ValueError(
+                "Registry decoration without any module class inputs has no effect."
+            )
 
         def _validate_signature(func: Callable):
             # Necessary to enforce that `func` has a valid signature (i.e. is a AlibiReplacementFunction)
@@ -78,26 +83,36 @@ class PolicyRegistry(dict[type[torch.nn.Module], AlibiReplacementFunction]):
             parameters = signature.parameters
             if len(parameters) != 3:
                 raise ValueError(
-                    f'Each alibi surgery function must accept 3 arguments, {func} accepts {len(parameters)}',
+                    f"Each alibi surgery function must accept 3 arguments, {func} accepts {len(parameters)}",
                 )
-            ((_, module_param), (_, index_param), (max_seq_name, max_seq_param)) = parameters.items()
+            ((_, module_param), (_, index_param), (max_seq_name, max_seq_param)) = (
+                parameters.items()
+            )
             if module_param.annotation != torch.nn.Module:
                 raise TypeError(
                     f'The first argument of alibi surgery function {func} must be of type "torch.nn.Module"',
                 )
             if index_param.annotation != int:
-                raise TypeError(f'The second argument of alibi surgery function {func} must be of type "int"')
+                raise TypeError(
+                    f'The second argument of alibi surgery function {func} must be of type "int"'
+                )
             if max_seq_param.annotation != int:
-                raise TypeError(f'The third argument of alibi surgery function {func} must be of type "int"')
-            if max_seq_name != 'max_sequence_length':
-                raise NameError(f'The third argument of function {func} must be named "max_sequence_length"')
+                raise TypeError(
+                    f'The third argument of alibi surgery function {func} must be of type "int"'
+                )
+            if max_seq_name != "max_sequence_length":
+                raise NameError(
+                    f'The third argument of function {func} must be named "max_sequence_length"'
+                )
 
         def _register_module(module: type[torch.nn.Module], func: Callable) -> None:
             if not issubclass(module, torch.nn.Module):
-                raise TypeError(f'Module {module.__name__} is not a subclass of `torch.nn.Module`.')
+                raise TypeError(
+                    f"Module {module.__name__} is not a subclass of `torch.nn.Module`."
+                )
             if module in self:
                 raise ValueError(
-                    f'An AlibiReplacementFunction has already been registered for module {module.__name__}.',
+                    f"An AlibiReplacementFunction has already been registered for module {module.__name__}.",
                 )
             self[module] = func
             return
@@ -126,10 +141,10 @@ def zero_and_freeze_expand_position_embeddings(
     """
     try:
         pos_embedding_module = attrgetter(position_embedding_attribute)(module)
-        old_weight = getattr(pos_embedding_module, 'weight')
+        old_weight = getattr(pos_embedding_module, "weight")
         if not isinstance(old_weight, torch.nn.Parameter):
             raise TypeError(
-                f'Module {module._get_name()}, position embedding {position_embedding_attribute}, '
+                f"Module {module._get_name()}, position embedding {position_embedding_attribute}, "
                 f"'weight' attribute must be of type torch.nn.Module",
             )
         new_weight = torch.nn.Parameter(
@@ -141,20 +156,24 @@ def zero_and_freeze_expand_position_embeddings(
             ),
         )
         new_weight.requires_grad = False
-        setattr(pos_embedding_module, 'weight', new_weight)
+        setattr(pos_embedding_module, "weight", new_weight)
 
-        log.info(f' Position embedding expanded to sequence length {max_sequence_length}, zeroed, and frozen')
+        log.info(
+            f" Position embedding expanded to sequence length {max_sequence_length}, zeroed, and frozen"
+        )
 
     except AttributeError:
         log.error(
-            f'Unable to zero and freeze position embeddings. Module '
-            f'{module} may lack attribute {position_embedding_attribute}, or position '
+            f"Unable to zero and freeze position embeddings. Module "
+            f"{module} may lack attribute {position_embedding_attribute}, or position "
             f"embeddings may lack attribute 'weight'.",
         )
         raise
 
 
-def register_alibi(module: torch.nn.Module, n_heads: int, max_token_length: int, causal: bool) -> torch.nn.Module:
+def register_alibi(
+    module: torch.nn.Module, n_heads: int, max_token_length: int, causal: bool
+) -> torch.nn.Module:
     """Adds ALiBi's linear attention biases as a buffer to the module."""
     if causal:  # e.g., for GPT
         # Modified from https://github.com/ofirpress/attention_with_linear_biases/blob/5b327adc6d131e28b40ba58906b30bb469483519/fairseq/models/transformer.py#L742
@@ -165,9 +184,9 @@ def register_alibi(module: torch.nn.Module, n_heads: int, max_token_length: int,
         # have in Figure 3, but one where all rows are identical.
         # This works because the softmax operation is invariant to translation, and our bias
         # functions are always linear.
-        alibi = slopes.unsqueeze(1).unsqueeze(1) * \
-            torch.arange(max_token_length). \
-            unsqueeze(0).unsqueeze(0).expand(n_heads, -1, -1)
+        alibi = slopes.unsqueeze(1).unsqueeze(1) * torch.arange(
+            max_token_length
+        ).unsqueeze(0).unsqueeze(0).expand(n_heads, -1, -1)
         assert alibi.shape == torch.Size([n_heads, 1, max_token_length])
 
     else:  # e.g., for BERT
@@ -185,28 +204,34 @@ def register_alibi(module: torch.nn.Module, n_heads: int, max_token_length: int,
         alibi = slopes.unsqueeze(1).unsqueeze(1) * -relative_position
         # [1, n_heads, max_token_length, max_token_length]
         alibi = alibi.unsqueeze(0)
-        assert alibi.shape == torch.Size([1, n_heads, max_token_length, max_token_length])
+        assert alibi.shape == torch.Size(
+            [1, n_heads, max_token_length, max_token_length]
+        )
 
     module_device = next(module.parameters()).device
-    module.register_buffer('alibi', alibi.to(module_device))
+    module.register_buffer("alibi", alibi.to(module_device))
     return module
 
 
 def _get_alibi_head_slopes(n_heads: int):
-
-    def get_slopes_power_of_2(n_heads):
-        start = (2**(-2**-(math.log2(n_heads) - 3)))
-        ratio = start
-        return [start * ratio**i for i in range(n_heads)]
-
     # In the paper, they only train models that have 2^a heads for some a. This function
     # has some good properties that only occur when the input is a power of 2. To
     # maintain that even when the number of heads is not a power of 2, we use a
     # workaround.
     if math.log2(n_heads).is_integer():
-        return get_slopes_power_of_2(n_heads)
+        return _get_slopes_power_of_2(n_heads)
     else:
-        closest_power_of_2 = 2**math.floor(math.log2(n_heads))
-        return get_slopes_power_of_2(closest_power_of_2) + _get_alibi_head_slopes(
-            2 * closest_power_of_2,
-        )[0::2][:n_heads - closest_power_of_2]
+        closest_power_of_2 = 2 ** math.floor(math.log2(n_heads))
+        slopes_closest_power_of_2 = _get_slopes_power_of_2(closest_power_of_2)
+        extended_slopes = (
+            slopes_closest_power_of_2
+            + _get_alibi_head_slopes(2 * closest_power_of_2)[0::2]
+        )
+        return extended_slopes[:n_heads]
+
+
+@lru_cache(None)
+def _get_slopes_power_of_2(n_heads):
+    start = 2 ** (-(2 ** -(math.log2(n_heads) - 3)))
+    ratio = start
+    return [start * ratio**i for i in range(n_heads)]
