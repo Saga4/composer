@@ -3,6 +3,8 @@
 
 """Core code for sequence length warmup."""
 
+from __future__ import annotations
+
 import logging
 import textwrap
 from typing import Mapping, Optional
@@ -10,14 +12,21 @@ from typing import Mapping, Optional
 import torch
 import torch.utils.data
 
-from composer.core import Algorithm, Batch, Event, State, TimeUnit, get_precision_context
+from composer.core import (
+    Algorithm,
+    Batch,
+    Event,
+    State,
+    TimeUnit,
+    get_precision_context,
+)
 from composer.loggers import Logger
 from composer.models import HuggingFaceModel
 from composer.utils import dist, ensure_tuple
 
 log = logging.getLogger(__name__)
 
-__all__ = ['SeqLengthWarmup', 'set_batch_sequence_length']
+__all__ = ["SeqLengthWarmup", "set_batch_sequence_length"]
 
 
 def set_batch_sequence_length(
@@ -74,77 +83,67 @@ def set_batch_sequence_length(
                 y_hat = model(X)
                 loss = loss_fn(y_hat, y)
     """
-
     assert isinstance(batch, Mapping)
 
-    # This should act like a no-op if curr_seq_len isn't shorter than the batch's sequence length
-    batch_seq_len = 0
-    # The batch sequence length is assumed to be the shape[1] dimension of any non-1D batch tensor
-    for batch_tensor in batch.values():
-        tensor_shape = batch_tensor.shape
-        if len(tensor_shape) > 1:
-            batch_seq_len = tensor_shape[1]
-            break
+    batch_seq_len = next(
+        (
+            batch_tensor.shape[1]
+            for batch_tensor in batch.values()
+            if batch_tensor.ndimension() > 1
+        ),
+        0,
+    )
     if curr_seq_len >= batch_seq_len:
         return batch
 
     if truncate:
-        # Truncate, but preserve end-of-sequence tokens
         if preserve_end_of_sequence:
-            if 'attention_mask' not in batch:
+            if "attention_mask" not in batch:
                 raise ValueError(
-                    'Sequence Length Warmup requires that the batch has "attention_mask" when using ``preserve_end_of_sequence=True``.',
+                    'Sequence Length Warmup requires that the batch has "attention_mask" when using `preserve_end_of_sequence=True`.',
                 )
-            r_idx = torch.arange(batch['attention_mask'].shape[0])
-            # eos_idx should point to the final token index for each batch sample
-            eos_idx = batch['attention_mask'].sum(dim=1).long() - 1
-            # eos_idx_truncated is the same thing, after truncation is applied
+            r_idx = torch.arange(batch["attention_mask"].shape[0])
+            eos_idx = batch["attention_mask"].sum(dim=1).long() - 1
             eos_idx_truncated = eos_idx.clamp(max=curr_seq_len - 1)
 
-            for k in batch.keys():
-                if batch[k].ndim < 2:
+            for k, v in batch.items():
+                if v.ndimension() < 2:
                     raise ValueError(
-                        f'Sequence Length Warmup requires that all tensors are sequence-shaped when ``truncate=True``. '
-                        f'Tensor "{k}" has shape {batch[k].shape}.',
+                        f'Sequence Length Warmup requires all tensors to be sequence-shaped when `truncate=True`. Tensor "{k}" has shape {v.shape}.'
                     )
                 eos_value = batch[k][r_idx, eos_idx]
                 batch[k] = batch[k][:, :curr_seq_len].contiguous()
                 batch[k][r_idx, eos_idx_truncated] = eos_value
-
         else:
-            for k in batch.keys():
-                if batch[k].ndim < 2:
+            for k, v in batch.items():
+                if v.ndimension() < 2:
                     raise ValueError(
-                        f'Sequence Length Warmup requires that all tensors are sequence-shaped when ``truncate=True``. '
-                        f'Tensor "{k}" has shape {batch[k].shape}.',
+                        f'Sequence Length Warmup requires all tensors to be sequence-shaped when `truncate=True`. Tensor "{k}" has shape {v.shape}.'
                     )
-                batch[k] = batch[k][:, :curr_seq_len].contiguous()
-
+                batch[k] = v[:, :curr_seq_len].contiguous()
     else:
-        if 'input_ids' not in batch:
+        if "input_ids" not in batch:
             raise ValueError(
-                'Sequence Length Warmup requires that the batch has "input_ids" when using ``truncate=False``.',
+                'Sequence Length Warmup requires the batch has "input_ids" when using `truncate=False`.',
             )
-        input_ids_shape = batch['input_ids'].shape
-        # ensure new tensor shape is divisible by curr_seq_len
-        input_ids = batch['input_ids'].view(-1)
-        tensor_len = (input_ids.shape[0] // curr_seq_len) * curr_seq_len
-
-        input_ids = input_ids[:tensor_len]
-        input_ids = input_ids.view(-1, curr_seq_len)
-        batch['input_ids'] = input_ids
+        input_ids_shape = batch["input_ids"].shape
+        input_ids = (
+            batch["input_ids"]
+            .reshape(-1)[: (input_ids_shape[0] // curr_seq_len) * curr_seq_len]
+            .reshape(-1, curr_seq_len)
+        )
 
         for k, v in batch.items():
-            if k == 'input_ids':
+            if k == "input_ids":
                 continue
             if v.shape != input_ids_shape:
                 raise ValueError(
-                    f'When using ``truncate=False``, Sequence Length Warmup only supports batches where all tensors have the same shape. '
+                    f"When using `truncate=False`, Sequence Length Warmup only supports batches where all tensors have the same shape. "
                     f'Tensor "{k}" has shape {v.shape} but should have shape {input_ids_shape}.',
                 )
-            v = v.view(-1)
-            v = v[:tensor_len]
-            batch[k] = v.view(-1, curr_seq_len)
+            batch[k] = v.reshape(-1)[
+                : (input_ids_shape[0] // curr_seq_len) * curr_seq_len
+            ].reshape(-1, curr_seq_len)
 
     return batch
 
@@ -235,14 +234,14 @@ class SeqLengthWarmup(Algorithm):
         self.truncate = truncate
         self.preserve_end_of_sequence = preserve_end_of_sequence
 
-        if self.duration < 0 or self.duration > 1:
-            raise ValueError(f'Duration must be between 0 and 1, got: {self.duration}')
+        if not (0 <= self.duration <= 1):
+            raise ValueError(f"Duration must be between 0 and 1, got: {self.duration}")
 
         if self.max_seq_length < self.min_seq_length:
             raise ValueError(
-                f'max_seq_length={self.max_seq_length} must be '
-                f'greater than min_seq_length={self.min_seq_length}',
+                f"max_seq_length={self.max_seq_length} must be greater than min_seq_length={self.min_seq_length}",
             )
+
         self._activated = False
         self._original_model = None
 
@@ -258,83 +257,72 @@ class SeqLengthWarmup(Algorithm):
         decreases state.device_train_microbatch_size accordingly. This logic mirrors the
         ``device_train_microbatch_size='auto'`` logic in :class:`.Trainer`.
         """
-
-        assert self._original_model is not None, 'original model should be set on Event.INIT'
+        assert self._original_model is not None, (
+            "original model should be set on Event.INIT"
+        )
 
         try:
-            # Both PyTorch and FFCV dataloaders define a `batch_size` attribute
-            # This exception would mainly be raised if the user is passing in a custom
-            # iterable
-            per_gpu_macrobatch = getattr(state.dataloader, 'batch_size')
+            per_gpu_macrobatch = getattr(state.dataloader, "batch_size")
         except AttributeError as e:
             raise AttributeError(
-                'Sequence Length Warmup requires the `state.dataloader` to have a `batch_size` attribute.',
+                "Sequence Length Warmup requires the `state.dataloader` to have a `batch_size` attribute.",
             ) from e
         if per_gpu_macrobatch is None:
-            raise RuntimeError('Sequence Length Warmup algorithm requires constant batch size.')
+            raise RuntimeError(
+                "Sequence Length Warmup algorithm requires constant batch size."
+            )
 
-        # truncate all sequence-shaped tensors to the max sequence length
-        batch_clone = {k: torch.clone(v) for k, v in state.batch.items()}
-        for k, v in batch_clone.items():
-            if v.ndim < 2:
-                raise ValueError(
-                    f'Sequence Length Warmup requires that all tensors are sequence-shaped. '
-                    f'Tensor "{k}" has shape {v.shape}.',
-                )
-            batch_clone[k] = v[:, :self.max_seq_length].contiguous()
+        batch_clone = {
+            k: v[:, : self.max_seq_length].contiguous() for k, v in state.batch.items()
+        }
 
-        # In-line to avoid circular dependency
-        from composer.trainer.trainer import _adjust_device_train_microbatch_size, _is_cuda_oom
+        from composer.trainer.trainer import (
+            _adjust_device_train_microbatch_size,
+            _is_cuda_oom,
+        )
 
-        # This loop tries to do a forward/backward pass using the current microbatch size.
-        # If it hits an OOM error, it halves `state.device_train_microbatch_size` and tries again
-        # until it succeeds.
         while True:
-            model_inputs = {k: v[:state.device_train_microbatch_size] for k, v in batch_clone.items()}
+            model_inputs = {
+                k: v[: state.device_train_microbatch_size]
+                for k, v in batch_clone.items()
+            }
 
             model_inputs = state.device.batch_to_device(model_inputs)
 
-            found_cuda_oom = 0  # int since bool BOR not supported on all torch.distributed backends
+            found_cuda_oom = 0
             try:
-                # Start by running a forward and backward pass
-                # of the maximum sequence length to allocate cache.
                 with get_precision_context(state.precision, state.precision_config):
                     outputs = state.model.forward(model_inputs)
                     loss = self._original_model.loss(outputs, model_inputs)
 
-                # Check if other ranks OOMed after forward pass when using auto microbatching. This may
-                # happen when close to memory limit or with uneven memory usage across ranks
                 if state.auto_microbatching:
-                    # Check if any other rank hit an OOM
-                    found_cuda_oom_tensor = state.device.tensor_to_device(torch.tensor([0], dtype=torch.uint8))
-                    dist.all_reduce(found_cuda_oom_tensor, reduce_operation='MAX')
+                    found_cuda_oom_tensor = state.device.tensor_to_device(
+                        torch.tensor([0], dtype=torch.uint8)
+                    )
+                    dist.all_reduce(found_cuda_oom_tensor, reduce_operation="MAX")
                     found_cuda_oom = found_cuda_oom_tensor.item()
-                    # Signal current rank is still in batch
-                    all_ranks_finished_tensor = state.device.tensor_to_device(torch.tensor([0], dtype=torch.uint8))
-                    dist.all_reduce(all_ranks_finished_tensor, reduce_operation='MIN')
 
                     if found_cuda_oom == 1:
-                        raise RuntimeError('CUDA out of memory encountered on a different rank')
+                        raise RuntimeError(
+                            "CUDA out of memory encountered on a different rank"
+                        )
 
-                # Since use_grad_scaling is in the Trainer, and we
-                # don't care about the loss values, skip scaling
                 for loss_item in ensure_tuple(loss):
                     loss_item.backward()
 
-                # Zero any gradients created by the backward pass
                 for optimizer in state.optimizers:
                     optimizer.zero_grad()
 
-            # This error/state.device_train_microbatch_size handling mimics the logic in trainer._train_batch().
             except RuntimeError as e:
                 if state.auto_microbatching and _is_cuda_oom(e):
-                    log.debug((f"Rank {dist.get_global_rank()} OOM'd."))
                     found_cuda_oom = 1
-                elif state.auto_microbatching and ('cuda' in str(e).lower() or 'c10' in str(e).lower()):
+                elif state.auto_microbatching and (
+                    "cuda" in str(e).lower() or "c10" in str(e).lower()
+                ):
                     raise ValueError(
                         textwrap.dedent(
-                            'Encountered non-addressable cuda error while using auto microbatching. '
-                            'If this repeatedly occurs, set `device_train_microbatch_size` manually.',
+                            "Encountered non-addressable cuda error while using auto microbatching. "
+                            "If this repeatedly occurs, set `device_train_microbatch_size` manually.",
                         ),
                     ) from e
                 else:
@@ -343,27 +331,29 @@ class SeqLengthWarmup(Algorithm):
             if state.auto_microbatching:
                 all_ranks_finished = False
                 while not all_ranks_finished:
-                    # Propagate across all ranks if any rank hit CUDA OOM
                     found_cuda_oom_tensor = state.device.tensor_to_device(
-                        torch.tensor([found_cuda_oom], dtype=torch.uint8),
+                        torch.tensor([found_cuda_oom], dtype=torch.uint8)
                     )
-                    dist.all_reduce(found_cuda_oom_tensor, reduce_operation='MAX')
+                    dist.all_reduce(found_cuda_oom_tensor, reduce_operation="MAX")
                     found_cuda_oom = found_cuda_oom_tensor.item()
-                    # Check if any rank is still not done with the batch. This may happen if only a
-                    # subset of ranks OOM, leaving some batches still in the forward pass
-                    all_ranks_finished_tensor = state.device.tensor_to_device(torch.tensor([1], dtype=torch.uint8))
-                    dist.all_reduce(all_ranks_finished_tensor, reduce_operation='MIN')
+
+                    all_ranks_finished_tensor = state.device.tensor_to_device(
+                        torch.tensor([1], dtype=torch.uint8)
+                    )
+                    dist.all_reduce(all_ranks_finished_tensor, reduce_operation="MIN")
                     all_ranks_finished = all_ranks_finished_tensor.item() == 1
+
                 if found_cuda_oom == 1:
                     _adjust_device_train_microbatch_size(state)
-                    # Skip return and rerun after handling oom
                     continue
-            # Activate and return if we've completed without OOMing.
+
             self._activated = True
             return
 
     def match(self, event: Event, state: State) -> bool:
-        return (event == Event.INIT and self._original_model is None) or event == Event.AFTER_DATALOADER
+        return (
+            event == Event.INIT and self._original_model is None
+        ) or event == Event.AFTER_DATALOADER
 
     def apply(self, event: Event, state: State, logger: Logger) -> Optional[int]:
         if event == Event.INIT:
@@ -371,24 +361,30 @@ class SeqLengthWarmup(Algorithm):
                 raise RuntimeError(
                     textwrap.dedent(
                         f"""\
-                    {type(self).__name__} requires state.model to be of type {HuggingFaceModel.__name__}, not of type {type(state.model)}""",
+                        {type(self).__name__} requires state.model to be of type {HuggingFaceModel.__name__}, not of type {type(state.model)}""",
                     ),
                 )
-
             self._original_model = state.model
             return
 
-        assert state.dataloader is not None, 'dataloader should be set on AFTER_DATALOADER'
-        assert state.max_duration is not None, 'max_duration should be set on AFTER_DATALOADER'
+        assert state.dataloader is not None, (
+            "dataloader should be set on AFTER_DATALOADER"
+        )
+        assert state.max_duration is not None, (
+            "max_duration should be set on AFTER_DATALOADER"
+        )
 
-        # in order to avoid OOMs, we do a forward and a backward pass on a dummy input.
         if not self._activated:
             self._activate_model(state, logger)
 
         if state.max_duration.unit == TimeUnit.EPOCH:
             if state.dataloader_len is None:
-                raise RuntimeError('Sequential Length Warmup requires the dataloader to be sized.')
-            num_optimization_steps = int(state.dataloader_len) * state.max_duration.value
+                raise RuntimeError(
+                    "Sequential Length Warmup requires the dataloader to be sized."
+                )
+            num_optimization_steps = (
+                int(state.dataloader_len) * state.max_duration.value
+            )
         elif state.max_duration.unit == TimeUnit.BATCH:
             num_optimization_steps = state.max_duration.value
         else:
@@ -401,20 +397,28 @@ class SeqLengthWarmup(Algorithm):
                     https://github.com/mosaicml/composer/issues/226.""",
                 ),
             )
-        num_warmup_steps = int(num_optimization_steps * self.duration)  # in batches
 
-        # assume the full sequence length is the unaltered sequence length
+        num_warmup_steps = int(num_optimization_steps * self.duration)
         num_update_steps = (self.max_seq_length - self.min_seq_length) // self.step_size
         update_every_n_steps = num_warmup_steps // num_update_steps
 
-        curr_seq_len = self.step_size * (int(state.timestamp.batch) // update_every_n_steps) + self.min_seq_length
-        curr_seq_len = max(curr_seq_len, self.min_seq_length)
-        curr_seq_len = min(curr_seq_len, self.max_seq_length)
+        curr_seq_len = min(
+            max(
+                self.step_size * (int(state.timestamp.batch) // update_every_n_steps)
+                + self.min_seq_length,
+                self.min_seq_length,
+            ),
+            self.max_seq_length,
+        )
 
-        state.batch = set_batch_sequence_length(state.batch, curr_seq_len, self.truncate, self.preserve_end_of_sequence)
+        state.batch = set_batch_sequence_length(
+            state.batch, curr_seq_len, self.truncate, self.preserve_end_of_sequence
+        )
 
-        batch_size = state.batch['input_ids'].shape[0]
-        logger.log_metrics({
-            'seq_length_warmup/curr_seq_len': curr_seq_len,
-            'seq_length_warmup/curr_bs': batch_size,
-        })
+        batch_size = state.batch["input_ids"].shape[0]
+        logger.log_metrics(
+            {
+                "seq_length_warmup/curr_seq_len": curr_seq_len,
+                "seq_length_warmup/curr_bs": batch_size,
+            }
+        )
