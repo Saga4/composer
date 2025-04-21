@@ -3,18 +3,21 @@
 
 """Log to `Tensorboard <https://www.tensorflow.org/tensorboard/>`_."""
 
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Any, Optional, Sequence, Union
 
 import numpy as np
 import torch
+import torch.distributed as dist
 
 from composer.core.state import State
 from composer.loggers.logger import Logger, format_log_data_value
 from composer.loggers.logger_destination import LoggerDestination
 from composer.utils import MissingConditionalImportError, dist
 
-__all__ = ['TensorboardLogger']
+__all__ = ["TensorboardLogger"]
 
 
 class TensorboardLogger(LoggerDestination):
@@ -45,14 +48,19 @@ class TensorboardLogger(LoggerDestination):
             Default: :attr:`True`.
     """
 
-    def __init__(self, log_dir: Optional[str] = None, flush_interval: int = 100, rank_zero_only: bool = True):
+    def __init__(
+        self,
+        log_dir: Optional[str] = None,
+        flush_interval: int = 100,
+        rank_zero_only: bool = True,
+    ):
         try:
             from torch.utils.tensorboard import SummaryWriter
         except ImportError as e:
             raise MissingConditionalImportError(
-                extra_deps_group='tensorboard',
-                conda_package='tensorboard',
-                conda_channel='conda-forge',
+                extra_deps_group="tensorboard",
+                conda_package="tensorboard",
+                conda_channel="conda-forge",
             ) from e
 
         self.log_dir = log_dir
@@ -64,13 +72,11 @@ class TensorboardLogger(LoggerDestination):
         self.current_metrics: dict[str, Any] = {}
 
     def log_hyperparameters(self, hyperparameters: dict[str, Any]):
-
-        if self.rank_zero_only and dist.get_global_rank() != 0:
+        if self.rank_zero_only and dist.get_world_size() > 1 and get_global_rank() != 0:
             return
-        # Lazy logging of hyperparameters b/c Tensorboard requires a metric to pair
-        # with hyperparameters.
         formatted_hparams = {
-            hparam_name: format_log_data_value(hparam_value) for hparam_name, hparam_value in hyperparameters.items()
+            hparam_name: format_log_data_value(hparam_value)
+            for hparam_name, hparam_value in hyperparameters.items()
         }
         self.hyperparameters.update(formatted_hparams)
 
@@ -82,7 +88,9 @@ class TensorboardLogger(LoggerDestination):
         self.current_metrics.update(metrics)
 
         for tag, metric in metrics.items():
-            if isinstance(metric, str):  # Will error out with weird caffe2 import error.
+            if isinstance(
+                metric, str
+            ):  # Will error out with weird caffe2 import error.
                 continue
             # TODO: handle logging non-(scalars/arrays/tensors/strings)
             # If a non-(scalars/arrays/tensors/strings) is passed, we skip logging it,
@@ -99,7 +107,7 @@ class TensorboardLogger(LoggerDestination):
 
         # We fix the log_dir, so all runs are co-located.
         if self.log_dir is None:
-            self.log_dir = 'tensorboard_logs'
+            self.log_dir = "tensorboard_logs"
 
         self._initialize_summary_writer()
 
@@ -115,7 +123,9 @@ class TensorboardLogger(LoggerDestination):
         # Disable SummaryWriter's internal flushing to avoid file corruption while
         # file staged for upload to an ObjectStore.
         flush_secs = 365 * 3600 * 24
-        self.writer = SummaryWriter(log_dir=summary_writer_log_dir, flush_secs=flush_secs)
+        self.writer = SummaryWriter(
+            log_dir=summary_writer_log_dir, flush_secs=flush_secs
+        )
 
     def batch_end(self, state: State, logger: Logger) -> None:
         if int(state.timestamp.batch) % self.flush_interval == 0:
@@ -128,9 +138,9 @@ class TensorboardLogger(LoggerDestination):
         # Give the metrics used for hparams a unique name, so they don't get plotted in the
         # normal metrics plot.
         metrics_for_hparams = {
-            'hparams/' + name: metric
+            "hparams/" + name: metric
             for name, metric in self.current_metrics.items()
-            if 'metric' in name or 'loss' in name
+            if "metric" in name or "loss" in name
         }
         assert self.writer is not None
         self.writer.add_hparams(
@@ -145,11 +155,20 @@ class TensorboardLogger(LoggerDestination):
 
     def log_images(
         self,
-        images: Union[np.ndarray, torch.Tensor, Sequence[Union[np.ndarray, torch.Tensor]]],
-        name: str = 'Images',
+        images: Union[
+            np.ndarray, torch.Tensor, Sequence[Union[np.ndarray, torch.Tensor]]
+        ],
+        name: str = "Images",
         channels_last: bool = False,
         step: Optional[int] = None,
-        masks: Optional[dict[str, Union[np.ndarray, torch.Tensor, Sequence[Union[np.ndarray, torch.Tensor]]]]] = None,
+        masks: Optional[
+            dict[
+                str,
+                Union[
+                    np.ndarray, torch.Tensor, Sequence[Union[np.ndarray, torch.Tensor]]
+                ],
+            ]
+        ] = None,
         mask_class_labels: Optional[dict[int, str]] = None,
         use_table: bool = False,
     ):
@@ -159,13 +178,20 @@ class TensorboardLogger(LoggerDestination):
         if images.ndim <= 3:
             assert images.ndim > 1
             if images.ndim == 2:  # Assume 2D image
-                data_format = 'HW'
+                data_format = "HW"
             else:  # Assume 2D image with channels?
-                data_format = 'HWC' if channels_last else 'CHW'
-            self.writer.add_image(name, images, global_step=step, dataformats=data_format)
+                data_format = "HWC" if channels_last else "CHW"
+            self.writer.add_image(
+                name, images, global_step=step, dataformats=data_format
+            )
             return
 
-        self.writer.add_images(name, images, global_step=step, dataformats='NHWC' if channels_last else 'NCHW')
+        self.writer.add_images(
+            name,
+            images,
+            global_step=step,
+            dataformats="NHWC" if channels_last else "NCHW",
+        )
 
     def _flush(self, logger: Logger):
         # To avoid empty files uploaded for each rank.
@@ -184,7 +210,10 @@ class TensorboardLogger(LoggerDestination):
         event_file_name = Path(file_path).stem
 
         logger.upload_file(
-            remote_file_name=('tensorboard_logs/{run_name}/' + f'{event_file_name}-{dist.get_global_rank()}'),
+            remote_file_name=(
+                "tensorboard_logs/{run_name}/"
+                + f"{event_file_name}-{dist.get_global_rank()}"
+            ),
             file_path=file_path,
             overwrite=True,
         )
