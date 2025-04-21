@@ -20,18 +20,18 @@ from composer.loss.utils import check_for_index_targets
 
 log = logging.getLogger(__name__)
 
-_VALID_MODES = ('crop', 'resize')
+_VALID_MODES = ("crop", "resize")
 
 T_ResizeTransform = Callable[[torch.Tensor], torch.Tensor]
 
-__all__ = ['resize_batch', 'ProgressiveResizing']
+__all__ = ["resize_batch", "ProgressiveResizing"]
 
 
 def resize_batch(
     input: torch.Tensor,
     target: torch.Tensor,
     scale_factor: float,
-    mode: str = 'resize',
+    mode: str = "resize",
     resize_targets: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Resize inputs and optionally outputs by cropping or interpolating.
@@ -67,9 +67,9 @@ def resize_batch(
                                                 resize_targets=False)
     """
     # Verify dimensionalities are enough to support resizing
-    assert input.dim() > 2, 'Input dimensionality not large enough for resizing'
+    assert input.dim() > 2, "Input dimensionality not large enough for resizing"
     if resize_targets is True:
-        assert target.dim() > 2, 'Target dimensionality not large enough for resizing'
+        assert target.dim() > 2, "Target dimensionality not large enough for resizing"
 
     # Short-circuit if nothing should be done
     if scale_factor >= 1:
@@ -82,15 +82,17 @@ def resize_batch(
     else:
         y_sized = target
 
-    if mode.lower() == 'crop' and resize_targets is False:
+    if mode.lower() == "crop" and resize_targets is False:
         # Make a crop transform for X
         resize_transform = _make_crop(tensor=input, scale_factor=scale_factor)
         X_sized, y_sized = resize_transform(input), target
-    elif mode.lower() == 'crop' and resize_targets is True:
+    elif mode.lower() == "crop" and resize_targets is True:
         # Make a crop transform for X and y
-        resize_transform, resize_y = _make_crop_pair(X=input, y=y_sized, scale_factor=scale_factor)
+        resize_transform, resize_y = _make_crop_pair(
+            X=input, y=y_sized, scale_factor=scale_factor
+        )
         X_sized, y_sized = resize_transform(input), resize_y(y_sized)
-    elif mode.lower() == 'resize':
+    elif mode.lower() == "resize":
         # Make a resize transform (can be used for X or y)
         resize_transform = _make_resize(scale_factor=scale_factor)
         X_sized = resize_transform(input)
@@ -174,63 +176,85 @@ class ProgressiveResizing(Algorithm):
 
     def __init__(
         self,
-        mode: str = 'resize',
-        initial_scale: float = .5,
-        finetune_fraction: float = .2,
-        delay_fraction: float = .5,
+        mode: str = "resize",
+        initial_scale: float = 0.5,
+        finetune_fraction: float = 0.2,
+        delay_fraction: float = 0.5,
         size_increment: int = 4,
         resize_targets: bool = False,
         input_key: Union[str, int, tuple[Callable, Callable], Any] = 0,
         target_key: Union[str, int, tuple[Callable, Callable], Any] = 1,
     ):
-
         if mode not in _VALID_MODES:
-            raise ValueError(f"mode '{mode}' is not supported. Must be one of {_VALID_MODES}")
+            raise ValueError(
+                f"mode '{mode}' is not supported. Must be one of {_VALID_MODES}"
+            )
 
         if not (0 <= initial_scale <= 1):
-            raise ValueError(f'initial_scale must be between 0 and 1: {initial_scale}')
+            raise ValueError(f"initial_scale must be between 0 and 1: {initial_scale}")
 
         if not (0 <= finetune_fraction <= 1):
-            raise ValueError(f'finetune_fraction must be between 0 and 1: {finetune_fraction}')
+            raise ValueError(
+                f"finetune_fraction must be between 0 and 1: {finetune_fraction}"
+            )
 
         if not (delay_fraction + finetune_fraction <= 1):
             raise ValueError(
-                f'delay_fraction + finetune_fraction must be less than 1: {delay_fraction + finetune_fraction}',
+                f"delay_fraction + finetune_fraction must be less than 1: {delay_fraction + finetune_fraction}",
             )
 
-        self.mode = mode
-        self.initial_scale = initial_scale
-        self.finetune_fraction = finetune_fraction
-        self.delay_fraction = delay_fraction
-        self.size_increment = size_increment
-        self.resize_targets = resize_targets
-        self.input_key, self.target_key = input_key, target_key
+        # Combine initialization to a single function to reduce operations
+        self._init_params(
+            mode,
+            initial_scale,
+            finetune_fraction,
+            delay_fraction,
+            size_increment,
+            resize_targets,
+            input_key,
+            target_key,
+        )
 
     def match(self, event: Event, state: State) -> bool:
-        return event == Event.AFTER_DATALOADER
+        return event is Event.AFTER_DATALOADER
 
-    def apply(self, event: Event, state: State, logger: Optional[Logger] = None) -> None:
-        input, target = state.batch_get_item(key=self.input_key), state.batch_get_item(key=self.target_key)
-        assert isinstance(input, torch.Tensor) and isinstance(target, torch.Tensor), \
-            'Multiple tensors not supported for this method yet.'
+    def apply(
+        self, event: Event, state: State, logger: Optional[Logger] = None
+    ) -> None:
+        input, target = (
+            state.batch_get_item(key=self.input_key),
+            state.batch_get_item(key=self.target_key),
+        )
+        assert isinstance(input, torch.Tensor) and isinstance(target, torch.Tensor), (
+            "Multiple tensors not supported for this method yet."
+        )
 
         # Calculate the current size of the inputs to use
         elapsed_duration = state.get_elapsed_duration()
-        assert elapsed_duration is not None, 'elapsed duration should be set on Event.AFTER_DATALOADER'
+        assert elapsed_duration is not None, (
+            "elapsed duration should be set on Event.AFTER_DATALOADER"
+        )
         if elapsed_duration.value >= self.delay_fraction:
-            scale_frac_elapsed = min([
-                (elapsed_duration.value - self.delay_fraction) / (1 - self.finetune_fraction - self.delay_fraction),
-                1,
-            ])
+            scale_frac_elapsed = min(
+                [
+                    (elapsed_duration.value - self.delay_fraction)
+                    / (1 - self.finetune_fraction - self.delay_fraction),
+                    1,
+                ]
+            )
         else:
             scale_frac_elapsed = 0.0
 
         # Linearly increase to full size at the start of the fine tuning period
-        scale_factor = self.initial_scale + (1 - self.initial_scale) * scale_frac_elapsed
+        scale_factor = (
+            self.initial_scale + (1 - self.initial_scale) * scale_frac_elapsed
+        )
 
         # adjust scale factor so that we make width a multiple of size_increment
         width = input.shape[3]
-        scaled_width_pinned = round(width * scale_factor / self.size_increment) * self.size_increment
+        scaled_width_pinned = (
+            round(width * scale_factor / self.size_increment) * self.size_increment
+        )
         scale_factor_pinned = scaled_width_pinned / width
 
         new_input, new_target = resize_batch(
@@ -244,11 +268,33 @@ class ProgressiveResizing(Algorithm):
         state.batch_set_item(self.target_key, new_target)
 
         if logger is not None:
-            logger.log_metrics({
-                'progressive_resizing/height': new_input.shape[2],
-                'progressive_resizing/width': new_input.shape[3],
-                'progressive_resizing/scale_factor': scale_factor,
-            })
+            logger.log_metrics(
+                {
+                    "progressive_resizing/height": new_input.shape[2],
+                    "progressive_resizing/width": new_input.shape[3],
+                    "progressive_resizing/scale_factor": scale_factor,
+                }
+            )
+
+    def _init_params(
+        self,
+        mode,
+        initial_scale,
+        finetune_fraction,
+        delay_fraction,
+        size_increment,
+        resize_targets,
+        input_key,
+        target_key,
+    ):
+        self.mode = mode
+        self.initial_scale = initial_scale
+        self.finetune_fraction = finetune_fraction
+        self.delay_fraction = delay_fraction
+        self.size_increment = size_increment
+        self.resize_targets = resize_targets
+        self.input_key = input_key
+        self.target_key = target_key
 
 
 def _make_crop(tensor: torch.Tensor, scale_factor: float) -> T_ResizeTransform:
@@ -291,12 +337,29 @@ def _make_crop_pair(
     topy = int(height_ratio * topX)
     lefty = int(width_ratio * leftX)
     # Make the two transforms
-    resize_X = partial(torchvision.transforms.functional.crop, top=int(topX), left=int(leftX), height=HcX, width=WcX)
-    resize_y = partial(torchvision.transforms.functional.crop, top=topy, left=lefty, height=Hcy, width=Wcy)
+    resize_X = partial(
+        torchvision.transforms.functional.crop,
+        top=int(topX),
+        left=int(leftX),
+        height=HcX,
+        width=WcX,
+    )
+    resize_y = partial(
+        torchvision.transforms.functional.crop,
+        top=topy,
+        left=lefty,
+        height=Hcy,
+        width=Wcy,
+    )
     return resize_X, resize_y
 
 
 def _make_resize(scale_factor: float) -> T_ResizeTransform:
     """Makes a nearest-neighbor interpolation transform at the specified scale factor."""
-    resize_transform = partial(F.interpolate, scale_factor=scale_factor, mode='nearest', recompute_scale_factor=False)
+    resize_transform = partial(
+        F.interpolate,
+        scale_factor=scale_factor,
+        mode="nearest",
+        recompute_scale_factor=False,
+    )
     return resize_transform
