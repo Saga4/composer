@@ -6,21 +6,20 @@
 from __future__ import annotations
 
 import collections.abc
-import operator
 import pathlib
-from functools import reduce
 from typing import TYPE_CHECKING, Any, Optional, Sequence, Union
 
 import numpy as np
 import torch
 
+from composer.loggers.logger_destination import LoggerDestination
 from composer.utils import ensure_tuple, format_name_with_dist
 
 if TYPE_CHECKING:
     from composer.core import State
     from composer.loggers.logger_destination import LoggerDestination
 
-__all__ = ['LoggerDestination', 'Logger', 'format_log_data_value']
+__all__ = ["LoggerDestination", "Logger", "format_log_data_value"]
 
 
 class Logger:
@@ -47,7 +46,9 @@ class Logger:
     def __init__(
         self,
         state: State,
-        destinations: Optional[Union[LoggerDestination, Sequence[LoggerDestination]]] = None,
+        destinations: Optional[
+            Union[LoggerDestination, Sequence[LoggerDestination]]
+        ] = None,
     ):
         self.destinations = ensure_tuple(destinations)
         self._state = state
@@ -64,7 +65,7 @@ class Logger:
         self,
         columns: list[str],
         rows: list[list[Any]],
-        name: str = 'Table',
+        name: str = "Table",
         step: Optional[int] = None,
     ) -> None:
         if step is None:
@@ -72,7 +73,9 @@ class Logger:
         for destination in self.destinations:
             destination.log_table(columns, rows, name, step)
 
-    def log_metrics(self, metrics: dict[str, float], step: Optional[int] = None) -> None:
+    def log_metrics(
+        self, metrics: dict[str, float], step: Optional[int] = None
+    ) -> None:
         if step is None:
             step = self._state.timestamp.batch.value
         for destination in self.destinations:
@@ -80,11 +83,20 @@ class Logger:
 
     def log_images(
         self,
-        images: Union[np.ndarray, torch.Tensor, Sequence[Union[np.ndarray, torch.Tensor]]],
-        name: str = 'Images',
+        images: Union[
+            np.ndarray, torch.Tensor, Sequence[Union[np.ndarray, torch.Tensor]]
+        ],
+        name: str = "Images",
         channels_last: bool = False,
         step: Optional[int] = None,
-        masks: Optional[dict[str, Union[np.ndarray, torch.Tensor, Sequence[Union[np.ndarray, torch.Tensor]]]]] = None,
+        masks: Optional[
+            dict[
+                str,
+                Union[
+                    np.ndarray, torch.Tensor, Sequence[Union[np.ndarray, torch.Tensor]]
+                ],
+            ]
+        ] = None,
         mask_class_labels: Optional[dict[int, str]] = None,
         use_table: bool = True,
     ):
@@ -140,12 +152,16 @@ class Logger:
             overwrite (bool, optional): Whether to overwrite an existing file with the same ``remote_file_name``.
                 (default: ``False``)
         """
-        file_path = format_name_with_dist(format_str=str(file_path), run_name=self._state.run_name)
+        file_path = format_name_with_dist(
+            format_str=str(file_path), run_name=self._state.run_name
+        )
         file_path = pathlib.Path(file_path)
         for destination in self.destinations:
             destination.upload_file(
                 state=self._state,
-                remote_file_name=format_name_with_dist(format_str=remote_file_name, run_name=self._state.run_name),
+                remote_file_name=format_name_with_dist(
+                    format_str=remote_file_name, run_name=self._state.run_name
+                ),
                 file_path=file_path,
                 overwrite=overwrite,
             )
@@ -174,27 +190,22 @@ def format_log_data_value(data: Any) -> str:
         str: ``data`` as a string.
     """
     if data is None:
-        return 'None'
+        return "None"
     if isinstance(data, str):
-        return f"\"{data}\""
-    if isinstance(data, int):
-        return str(data)
-    if isinstance(data, float):
-        return f'{data:.4f}'
+        return f'"{data}"'
+    if isinstance(data, (int, float)):
+        return str(data) if isinstance(data, int) else f"{data:.4f}"
     if isinstance(data, torch.Tensor):
-        if data.shape == () or reduce(operator.mul, data.shape, 1) == 1:
-            return format_log_data_value(data.cpu().item())
-        return 'Tensor of shape ' + str(data.shape)
+        if data.numel() == 1:
+            return format_log_data_value(data.item())
+        return f"Tensor of shape {data.shape}"
     if isinstance(data, collections.abc.Mapping):
-        output = ['{ ']
-        for k, v in data.items():
-            assert isinstance(k, str)
-            v = format_log_data_value(v)
-            output.append(f"\"{k}\": {v}, ")
-        output.append('}')
-        return ''.join(output)
+        return (
+            "{ "
+            + ", ".join(f'"{k}": {format_log_data_value(v)}, ' for k, v in data.items())
+            + "}"
+        )
     if isinstance(data, collections.abc.Iterable):
-        return '[' + ', '.join(format_log_data_value(v) for v in data) + ']'
+        return "[" + ", ".join(format_log_data_value(v) for v in data) + "]"
 
-    # Unknown format catch-all
     return str(data)
