@@ -17,7 +17,7 @@ from composer.models import ComposerModel
 
 log = logging.getLogger(__name__)
 
-__all__ = ['GradientClipping', 'apply_gradient_clipping']
+__all__ = ["GradientClipping", "apply_gradient_clipping"]
 
 
 def apply_gradient_clipping(
@@ -45,22 +45,28 @@ def apply_gradient_clipping(
     if fsdp_enabled:
         for module in model.modules():
             if isinstance(module, FullyShardedDataParallel) and module.check_is_root():
-                if clipping_type == 'norm':
+                if clipping_type == "norm":
                     module.clip_grad_norm_(max_norm=clipping_threshold)
-                elif clipping_type == 'value':
-                    module.clip_grad_norm_(max_norm=clipping_threshold, norm_type=float('inf'))
+                elif clipping_type == "value":
+                    module.clip_grad_norm_(
+                        max_norm=clipping_threshold, norm_type=float("inf")
+                    )
                 else:
-                    raise ValueError(f"clipping type must be 'norm' or 'value' with FSDP not {clipping_type}")
+                    raise ValueError(
+                        f"clipping type must be 'norm' or 'value' with FSDP not {clipping_type}"
+                    )
     else:
         parameters = model.parameters()
-        if clipping_type == 'adaptive':
+        if clipping_type == "adaptive":
             _apply_agc(parameters, clipping_threshold=clipping_threshold)
-        elif clipping_type == 'norm':
+        elif clipping_type == "norm":
             torch.nn.utils.clip_grad_norm_(parameters, max_norm=clipping_threshold)
-        elif clipping_type == 'value':
+        elif clipping_type == "value":
             torch.nn.utils.clip_grad_value_(parameters, clip_value=clipping_threshold)
         else:
-            raise ValueError(f"clipping_type must be 'adaptive', 'norm', or 'value' not {clipping_type} ")
+            raise ValueError(
+                f"clipping_type must be 'adaptive', 'norm', or 'value' not {clipping_type} "
+            )
 
 
 def _apply_agc(
@@ -84,7 +90,9 @@ def _apply_agc(
         grad = param.grad.detach()
 
         # Get clipped version of gradients.
-        clipped_grad_coeff = _get_clipped_gradient_coeff(weights, grad, clipping_threshold=clipping_threshold)
+        clipped_grad_coeff = _get_clipped_gradient_coeff(
+            weights, grad, clipping_threshold=clipping_threshold
+        )
 
         # Copy clipped gradients into param.grad attribute, so they can be accessed by
         # optimizer.
@@ -141,7 +149,9 @@ class GradientClipping(Algorithm):
             )
 
 
-def _get_clipped_gradient_coeff(weights: torch.Tensor, grad: torch.Tensor, clipping_threshold: float = 0.01):
+def _get_clipped_gradient_coeff(
+    weights: torch.Tensor, grad: torch.Tensor, clipping_threshold: float = 0.01
+):
     """Clips all gradients in model based on ratio of gradient norms to parameter norms.
 
     Gradients whose norms exceed
@@ -165,13 +175,15 @@ def _get_clipped_gradient_coeff(weights: torch.Tensor, grad: torch.Tensor, clipp
     """
 
     # Compute and clamp grad and weight norms.
-    w_norm = _unitwise_norm(weights)
-    grad_norm = _unitwise_norm(grad)
+    w_norm = _unitwise_norm_optimized(weights)
+    grad_norm = _unitwise_norm_optimized(grad)
 
     # Gradients whose norms are greater than weight_norm * clipping_threhsold are
     # scaled down by (weight_norm * clipping_threhsold) / grad_norm.
-    max_norm = w_norm.mul_(clipping_threshold)
-    clipped_grad_coeff = max_norm.div_(grad_norm).nan_to_num_(nan=1.0).clamp_(max=1.0)
+    max_norm = w_norm * clipping_threshold
+    clipped_grad_coeff = (
+        torch.true_divide(max_norm, grad_norm).nan_to_num_(nan=1.0).clamp_(max=1.0)
+    )
 
     return clipped_grad_coeff
 
@@ -202,3 +214,27 @@ def _unitwise_norm(tensor: torch.Tensor):
         keepdim = True
     # L2 Norm.
     return torch.linalg.vector_norm(tensor, ord=2, dim=dim, keepdim=keepdim)
+
+
+def _unitwise_norm_optimized(tensor: torch.Tensor):
+    """Implements unitwise norm as described in Brock et al, 2021.
+
+    For 0D scalars of shape [], we trivially normalize with dim=0 which essentially returns the absolute value of the scalar.
+    For 1D *.bias weights of shape [out_features], we normalize across entire vector -> dim=0.
+    For 2D torch.nn.Linear weights of shape [out_features, in_features]: we normalize across in_features -> dim = 1
+    For 4D torch.nn.Conv2d weights [out_channels, in_channels, kernel_height, kernel_width]:
+        we normalize across [in_channels, kernel_height, kernel_width] -> dim = (1, 2, 3).
+    If a 3D parameter were somehow in your model, we would normalize by the last two dimensions -> dim = (1,2).
+
+    Args:
+        tensor (torch.Tensor): A parameter or gradient of the model.
+
+    Returns:
+        The appropriate L2 norm of the parameter or gradient as described above.
+    """
+    # 0D for scalars, 1D for bias vectors.
+    if tensor.ndim <= 1:
+        return tensor.abs() if tensor.ndim == 0 else tensor.norm(p=2)
+    # 2D corresponds to MLPs and 4D corresponds to ConvNets.
+    dim = tuple(range(1, tensor.ndim))
+    return tensor.norm(p=2, dim=dim, keepdim=True)
